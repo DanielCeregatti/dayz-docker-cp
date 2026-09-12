@@ -53,6 +53,26 @@ READY_MARKERS = ("Player connect enabled", "Average server FPS:")
 # done, and a process that has not exited by now will not.
 SHUTDOWN_DONE_MARKERS = ("~DayZGame()", "Termination successfully completed")
 
+# glibc's own account of a heap it can no longer trust, printed by the engine's
+# teardown when threads tear the same structures down twice. The allocator has
+# already aborted by the time the text appears, so the process is not going to
+# reach exit(): waiting on it only spends the stop timeout. Matched lowercase
+# because glibc's wording varies with the failing check.
+DEADLOCK_MARKERS = (
+    "double free",
+    "prev != next",
+    "corrupted double-linked list",
+    "malloc(): ",
+    "free(): invalid",
+    "munmap_chunk(): invalid pointer",
+)
+
+# The engine's own crash handler, which shells out to a CrashReporter binary
+# that the Linux build does not ship - so the only trace is the shell saying it
+# is missing. It runs after the minidump is on disk and only ever runs because
+# the process is already dying, which makes it as final as a heap abort.
+CRASH_HANDLER_MARKERS = ("crashreporter",)
+
 # How long a process gets to disappear on its own after the engine said it was
 # finished. Generous for an exit that is only teardown, short enough that a
 # restart is not left waiting on a corpse.
@@ -130,6 +150,9 @@ class ServerManager:
         self._exited = threading.Event()
         self._exited.set()
         self._engine_done = threading.Event()
+        self._doomed = threading.Event()
+        self._doomed_reason = ""
+        self._killed = threading.Event()
         self._crashes: deque[float] = deque(maxlen=len(RESTART_DELAYS) + 1)
         self._restart_timer: threading.Timer | None = None
         self._ready_timer: threading.Timer | None = None
@@ -345,6 +368,9 @@ class ServerManager:
             self._cpu_sample = None
             self._cpu_percent = 0.0
             self._engine_done.clear()
+            self._doomed.clear()
+            self._doomed_reason = ""
+            self._killed.clear()
             self._arm_ready_timer()
 
         log.info("DayZ server started (pid %s, %s)", proc.pid, reason)
@@ -383,6 +409,23 @@ class ServerManager:
             if self._proc is not proc:
                 return
             state = self._state
+
+        lowered = line.lower()
+        reason = ""
+        if any(marker in lowered for marker in DEADLOCK_MARKERS):
+            reason = "the allocator aborted"
+        elif any(marker in lowered for marker in CRASH_HANDLER_MARKERS):
+            reason = "the engine crashed"
+        if reason:
+            if not self._doomed.is_set():
+                self._doomed_reason = reason
+                self._doomed.set()
+                self._console.append(
+                    f"[panel] {reason.capitalize()} - this process will not exit "
+                    "on its own; a stop or restart will kill it straight away"
+                )
+                log.warning("DayZ server will not exit (%s): %s", reason, line.strip())
+            return
 
         if any(marker in line for marker in SHUTDOWN_DONE_MARKERS):
             if not self._engine_done.is_set():
@@ -437,7 +480,9 @@ class ServerManager:
 
             if expected:
                 self._crashes.clear()
-                self._console.append(f"[panel] Server stopped (exit code {code})")
+                self._console.append(
+                    f"[panel] Server stopped (exit code {code}){self._exit_note(code)}"
+                )
                 log.info("DayZ server stopped (exit code %s)", code)
                 return
 
@@ -468,6 +513,23 @@ class ServerManager:
             f"[panel] Auto restart {attempt}/{len(RESTART_DELAYS)} in {delay}s"
         )
         self._schedule_restart(delay)
+
+    def _exit_note(self, code: int) -> str:
+        """Why the process ended, when the exit code alone does not say.
+
+        A signal during a requested stop is either our SIGKILL or the engine
+        dying in its own teardown, and the operator should not have to guess
+        which - especially now that a dying process is killed on sight.
+        """
+        if self._killed.is_set():
+            if self._doomed.is_set():
+                return f" - killed after {self._doomed_reason}; unwritten state is lost"
+            return " - killed after it did not shut down in time"
+        if self._doomed.is_set():
+            return f" - {self._doomed_reason} and it died on its own"
+        if code < 0:
+            return " - it crashed on the way out rather than exiting cleanly"
+        return ""
 
     def _schedule_restart(self, delay: float) -> None:
         def run() -> None:
@@ -514,6 +576,20 @@ class ServerManager:
             except subprocess.TimeoutExpired:
                 pass
 
+            # Both are terminal. Whatever the engine had left to write it is
+            # not going to, so the timeout protects nothing from here.
+            if self._doomed.is_set():
+                self._console.append(
+                    f"[panel] Killing the process now - {self._doomed_reason} and "
+                    "the shutdown timeout would only delay the restart"
+                )
+                log.warning(
+                    "DayZ server will not exit (%s), sending SIGKILL",
+                    self._doomed_reason,
+                )
+                self._send_kill(proc)
+                return
+
             # The engine has said it is done, so the save is written and what is
             # left is teardown. Give that a short grace instead of the operator's
             # full timeout - see SHUTDOWN_DONE_MARKERS.
@@ -539,6 +615,7 @@ class ServerManager:
         self._send_kill(proc)
 
     def _send_kill(self, proc: subprocess.Popen) -> None:
+        self._killed.set()
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         except (OSError, ProcessLookupError):

@@ -26,6 +26,15 @@ services:
     volumes:
       - ./data:/data            # or a named volume: dayz-data:/data
 
+    # Lets the panel nice the DayZ server to -20 - see SERVER_NICE in
+    # services/server.py. It is the rlimit that does it, not a capability:
+    # the panel runs as the steam user, and a process that drops from root to
+    # an ordinary uid keeps nothing in its effective capability set, so
+    # cap_add: SYS_NICE is no help here. The kernel lets an unprivileged
+    # process reach nice N when RLIMIT_NICE >= 20 - N, hence 40 for -20.
+    ulimits:
+      nice: 40
+
     stop_grace_period: 60s      # the panel shuts the server down first
     restart: unless-stopped
     tty: true                   # SteamCMD buffers its progress output otherwise

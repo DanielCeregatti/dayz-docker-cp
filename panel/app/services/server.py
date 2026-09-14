@@ -73,6 +73,15 @@ DEADLOCK_MARKERS = (
 # the process is already dying, which makes it as final as a heap abort.
 CRASH_HANDLER_MARKERS = ("crashreporter",)
 
+# What the engine is niced to once it is running. -20 is as favoured as a
+# process gets, which is the point: the container also runs the panel, SteamCMD
+# and backups, and a mod download must not take time from the game loop.
+#
+# Needs CAP_SYS_NICE - see cap_add in docker-compose.yml. Without it the kernel
+# refuses the call and the server runs at the default priority instead, which is
+# a worse server but still a server, so it is not treated as a failed start.
+SERVER_NICE = -20
+
 # How long a process gets to disappear on its own after the engine said it was
 # finished. Generous for an exit that is only teardown, short enough that a
 # restart is not left waiting on a corpse.
@@ -354,6 +363,7 @@ class ServerManager:
             # spawned instead of only the top process.
             start_new_session=True,
         )
+        self._raise_priority(proc)
 
         exited = threading.Event()
         with self._lock:
@@ -380,6 +390,27 @@ class ServerManager:
             name=f"dayz-watch-{proc.pid}",
             daemon=True,
         ).start()
+
+    def _raise_priority(self, proc: subprocess.Popen) -> None:
+        """Put the engine ahead of everything else sharing the container.
+
+        From the parent rather than a preexec_fn: that runs between fork and
+        exec in a process with several threads, which is exactly where it can
+        deadlock. The engine's own worker threads inherit this value, being
+        created long after the call below lands.
+        """
+        try:
+            os.setpriority(os.PRIO_PROCESS, proc.pid, SERVER_NICE)
+        except OSError as exc:
+            self._console.append(
+                f"[panel] Could not raise the server's priority ({exc.strerror}) "
+                "- it needs the SYS_NICE capability"
+            )
+            log.warning("setpriority(%s) refused: %s", SERVER_NICE, exc)
+            return
+
+        self._console.append(f"[panel] Server priority raised to nice {SERVER_NICE}")
+        log.info("DayZ server niced to %s", SERVER_NICE)
 
     def _watch(self, proc: subprocess.Popen, exited: threading.Event) -> None:
         """Pump the server's output, then decide what its exit meant."""

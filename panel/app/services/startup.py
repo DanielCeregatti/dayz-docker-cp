@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 
+from . import server_files
 from .jobs import JobBusy, JobState
 from .server import ServerError
 
@@ -30,6 +32,10 @@ log = logging.getLogger(__name__)
 # because a first install is gigabytes; small enough that a wedged job does
 # not keep the server from ever starting.
 JOB_TIMEOUT_SECONDS = 3 * 60 * 60
+
+# Pause before the one retry of a failed server files update. Steam's own
+# hiccups - an app info request that times out - are usually over by then.
+UPDATE_RETRY_SECONDS = 60
 
 
 class StartupSequence:
@@ -124,7 +130,7 @@ class StartupSequence:
 
             if "server files" in steps:
                 self._set_step("updating server files")
-                if not self._await(self.steamcmd.update_server()):
+                if not self._update_server_files():
                     return
 
             if "mods" in steps:
@@ -144,18 +150,70 @@ class StartupSequence:
                 self._running = False
                 self._step = ""
 
-    def _await(self, job) -> bool:
-        """Wait for a job. False means the server must not be started."""
-        if job is None:
-            return True
+    def _update_server_files(self) -> bool:
+        """Update the server files. False means the server must not be started.
 
-        if not job.done.wait(JOB_TIMEOUT_SECONDS):
-            log.warning("Job %s did not finish in time - not starting the server", job.id)
+        A failed update gets one retry. If that fails as well but SteamCMD left
+        the app manifest exactly as it was, no update ever began and the files
+        on disk are the ones the server last ran on, so it starts on those. A
+        Steam timeout before the download kept the server down from the 06:00
+        restart until someone noticed at noon (26 Oct 2026); an update that got
+        far enough to touch the manifest is still a stop sign.
+        """
+        manifest = self._read_manifest()
+        job = self.steamcmd.update_server()
+        if not self._finished(job):
             return False
-
         if job.state is JobState.SUCCESS:
             return True
 
+        if job.state is JobState.FAILED:
+            log.warning("Job %s failed - retrying in %d s", job.id, UPDATE_RETRY_SECONDS)
+            self.manager.console_buffer.append(
+                f"[panel] {job.title} failed - retrying in {UPDATE_RETRY_SECONDS} s."
+            )
+            self._set_step("retrying the server files update")
+            time.sleep(UPDATE_RETRY_SECONDS)
+            job = self.steamcmd.update_server()
+            if not self._finished(job):
+                return False
+            if job.state is JobState.SUCCESS:
+                return True
+
+        untouched = manifest is not None and self._read_manifest() == manifest
+        if job.state is JobState.FAILED and untouched:
+            log.warning("Job %s failed without touching the server files - starting anyway", job.id)
+            self.manager.console_buffer.append(
+                f"[panel] {job.title} failed twice but changed nothing - "
+                "starting on the current files."
+            )
+            return True
+
+        return self._refuse(job)
+
+    def _read_manifest(self) -> bytes | None:
+        path = server_files.manifest_path(self.settings.paths, self.settings.SERVER_APP_ID)
+        try:
+            return path.read_bytes()
+        except OSError:
+            return None
+
+    def _finished(self, job) -> bool:
+        """Wait for a job. False means it ran out of time and the server stays down."""
+        if job is None or job.done.wait(JOB_TIMEOUT_SECONDS):
+            return True
+        log.warning("Job %s did not finish in time - not starting the server", job.id)
+        return False
+
+    def _await(self, job) -> bool:
+        """Wait for a job. False means the server must not be started."""
+        if not self._finished(job):
+            return False
+        if job is None or job.state is JobState.SUCCESS:
+            return True
+        return self._refuse(job)
+
+    def _refuse(self, job) -> bool:
         # A failed update before a start is a stop sign. Starting anyway could
         # mean running half-written files, and the operator has to see why.
         log.warning("Job %s ended as %s - not starting the server", job.id, job.state.value)

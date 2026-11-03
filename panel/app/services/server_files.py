@@ -27,11 +27,14 @@ log = logging.getLogger(__name__)
 STATE_FILE = "server_files.json"
 
 
+def manifest_path(paths, app_id: int) -> Path:
+    return paths.server / "steamapps" / f"appmanifest_{app_id}.acf"
+
+
 def read_manifest(paths, app_id: int) -> dict:
     """Build id and update time from the Steam manifest, empty if unreadable."""
-    path = paths.server / "steamapps" / f"appmanifest_{app_id}.acf"
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = manifest_path(paths, app_id).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return {}
 

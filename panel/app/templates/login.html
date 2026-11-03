@@ -25,7 +25,7 @@
     {% endfor %}
   {% endwith %}
 
-  <form method="post" novalidate>
+  <form method="post" id="login-form" novalidate>
     {{ form.csrf_token }}
 
     <div class="mb-3">
@@ -55,5 +55,7 @@
 </main>
 
 <script src="{{ url_for('static', filename='vendor/bootstrap.bundle.min.js') }}"></script>
+<script src="{{ url_for('static', filename='js/login.js') }}"
+        data-token-url="{{ url_for('auth.login_token') }}"></script>
 </body>
 </html>

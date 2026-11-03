@@ -11,9 +11,10 @@ from __future__ import annotations
 import hmac
 import logging
 
-from flask import Blueprint, current_app, flash, redirect, render_template, request, url_for
+from flask import Blueprint, current_app, flash, jsonify, redirect, render_template, request, url_for
 from flask_login import UserMixin, current_user, login_required, login_user, logout_user
 from flask_wtf import FlaskForm
+from flask_wtf.csrf import generate_csrf
 from werkzeug.security import check_password_hash, generate_password_hash
 from wtforms import BooleanField, PasswordField, StringField
 from wtforms.validators import DataRequired, Length
@@ -90,6 +91,19 @@ def login():
         flash("Invalid username or password.", "danger")
 
     return render_template("login.html", form=form)
+
+
+@bp.get("/login/token")
+def login_token():
+    """A fresh CSRF token for a sign-in page that has been open a while.
+
+    The form's token is only as good as the session cookie it came with, and
+    that cookie is refused once it is SESSION_LIFETIME_HOURS old, signed in or
+    not. A sign-in page left open overnight would post a token nothing can be
+    checked against, so login.js asks here first; a cookie to match comes with
+    the answer.
+    """
+    return jsonify(csrf_token=generate_csrf())
 
 
 @bp.post("/logout")

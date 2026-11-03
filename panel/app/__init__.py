@@ -17,8 +17,9 @@ import threading
 import time
 from datetime import timedelta
 
-from flask import Flask, has_request_context, jsonify, render_template, request
+from flask import Flask, flash, has_request_context, jsonify, redirect, render_template, request, url_for
 from flask.sessions import SecureCookieSessionInterface
+from flask_wtf.csrf import CSRFError
 
 from . import auth
 from .config import Settings
@@ -279,6 +280,23 @@ def _register_error_handlers(app: Flask) -> None:
                 message="Too many attempts. Please wait a moment and try again.",
             ),
             429,
+        )
+
+    @app.errorhandler(CSRFError)
+    def csrf_failed(_error):
+        """A form posted with a token its session no longer backs.
+
+        Usually a page left open past SESSION_LIFETIME_HOURS: the session
+        cookie holding the token is refused once it is that old. The sign-in
+        page goes back to a fresh copy of itself; anything else gets the error
+        page, still a 400, which is what the pages' own scripts reload on.
+        """
+        if request.endpoint == "auth.login":
+            flash("The sign-in page had expired. Please sign in again.", "warning")
+            return redirect(url_for("auth.login", next=request.args.get("next")))
+        return (
+            render_template("error.html", code=400, message="This page had expired. Reload it and try again."),
+            400,
         )
 
     @app.errorhandler(413)

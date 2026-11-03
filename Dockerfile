@@ -33,6 +33,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # restic is the backup engine behind the Backups page (services/backup.py):
 # block level deduplication, so the second snapshot of a 4 GB server directory
 # costs what actually changed instead of another 4 GB.
+# jq, xmlstarlet and patch are for scripts that edit the mission files in
+# place: cfggameplay.json, the CE XML files, init.c.
 # ---------------------------------------------------------------------------
 RUN set -eux; \
     sed -i 's/^Components: .*/Components: main contrib non-free non-free-firmware/' \
@@ -52,6 +54,9 @@ RUN set -eux; \
         curl \
         rsync \
         restic \
+        jq \
+        xmlstarlet \
+        patch \
         tzdata; \
     rm -rf /var/lib/apt/lists/*; \
     ln -sf /usr/games/steamcmd /usr/bin/steamcmd

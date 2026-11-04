@@ -655,6 +655,22 @@ class ModService:
             if renamed:
                 job.log_line(f"[panel] Lowercased {renamed} path(s) for Linux")
 
+            # Before the keys: a key the mod stopped shipping must not be
+            # copied into server/keys again on its way out.
+            if _has_addons(source):
+                removed = _prune_dropped(target, source)
+                if removed:
+                    job.log_line(
+                        f"[panel] Removed {len(removed)} file(s) from server/{dir_name} "
+                        "that the new version no longer ships:"
+                    )
+                    for relative in removed:
+                        job.log_line(f"[panel]   {relative}")
+            else:
+                # A download without addons/ is not a mod, whatever SteamCMD
+                # said. Pruning against it would empty the installed copy.
+                job.log_line("[panel] The download has no addons folder - nothing removed")
+
             resolved_type = mod_type or (existing.mod_type if existing else "client")
             mod = Mod(
                 workshop_id=workshop_id,
@@ -1113,6 +1129,48 @@ def _lowercase_tree(root: Path) -> int:
             except OSError as exc:
                 log.warning("Could not rename %s: %s", source, exc)
     return renamed
+
+
+def _prune_dropped(root: Path, source: Path) -> list[str]:
+    """Delete the files below `root` that the download in `source` lacks.
+
+    An update is copied over the installed version, which replaces files but
+    never removes one, so whatever a mod stopped shipping stays on the server.
+    The costly case is a signature: a stale .bisign beside an updated PBO fails
+    the server's check, and every client is refused with 115, "missing PBO",
+    for a file it has. Deer Isle's jmc_atv.pbo kept everyone out that way from
+    31 Oct to 3 Nov 2026.
+
+    The installed copy is Steam's, like the download, so a file put into it by
+    hand goes too - as it does on Reinstall. Compared case-insensitively: the
+    tree below `root` is lowercased, the download is not. Returns the removed
+    paths, relative to `root`.
+    """
+    shipped = {
+        path.relative_to(source).as_posix().lower()
+        for path in source.rglob("*")
+    }
+    removed = []
+    for current, dirs, files in os.walk(root, topdown=False):
+        for name in files:
+            path = Path(current) / name
+            relative = path.relative_to(root).as_posix()
+            if relative.lower() in shipped:
+                continue
+            try:
+                path.unlink()
+                removed.append(relative)
+            except OSError as exc:
+                log.warning("Could not remove %s: %s", path, exc)
+        for name in dirs:
+            path = Path(current) / name
+            if path.relative_to(root).as_posix().lower() in shipped:
+                continue
+            try:
+                path.rmdir()  # only once empty: a file in it may have failed to go
+            except OSError:
+                pass
+    return sorted(removed)
 
 
 def _mod_roots(names: list[str]) -> set[str]:
